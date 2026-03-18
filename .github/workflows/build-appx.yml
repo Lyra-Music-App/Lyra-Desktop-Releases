@@ -15,6 +15,9 @@ jobs:
         with:
           node-version: 20
 
+      - name: Configure git to use HTTPS instead of SSH
+        run: git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+
       - name: Download build zip
         run: |
           gh release download appx-build --pattern "appx-build.zip" --dir .
@@ -26,7 +29,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: electron-app
-        run: yarn install --frozen-lockfile
+        run: yarn install
 
       - name: Build APPX
         working-directory: electron-app
