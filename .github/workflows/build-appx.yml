@@ -39,85 +39,71 @@ jobs:
         working-directory: electron-app
         run: |
           $appxFile = Get-ChildItem -Path dist -Filter "*.appx" | Select-Object -First 1
-          if ($appxFile) {
-            Write-Host "Found APPX: $($appxFile.FullName)"
-            
-            # Create temp directory
-            $tempDir = "dist\_appx_temp"
-            New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
-            
-            # Extract APPX (it's a zip)
-            Expand-Archive -Path $appxFile.FullName -DestinationPath $tempDir -Force
-            
-            # Copy tile assets from buildResources to assets folder
-            $assetsDir = "$tempDir\assets"
-            $tiles = @("Square44x44Logo.png", "Square71x71Logo.png", "Square150x150Logo.png", "Square310x310Logo.png", "Wide310x150Logo.png", "StoreLogo.png")
-            foreach ($tile in $tiles) {
-              $src = "buildResources\$tile"
-              if (Test-Path $src) {
-                Copy-Item $src "$assetsDir\$tile" -Force
-                Write-Host "  Copied $tile"
-              }
+          if (-not $appxFile) { Write-Error "No APPX found!"; exit 1 }
+          Write-Host "Found APPX: $($appxFile.FullName)"
+          
+          $tempDir = "dist\_appx_temp"
+          
+          # Use 7z to extract APPX properly (preserves internal structure)
+          & 7z x $appxFile.FullName -o"$tempDir" -y
+          
+          # List contents to verify
+          Write-Host "=== Extracted contents ==="
+          Get-ChildItem -Path $tempDir -Recurse -Depth 1 | ForEach-Object { Write-Host $_.FullName }
+          
+          # Copy tile assets
+          $assetsDir = "$tempDir\assets"
+          if (-not (Test-Path $assetsDir)) { New-Item -ItemType Directory -Force -Path $assetsDir | Out-Null }
+          
+          $tiles = @("Square44x44Logo.png", "Square71x71Logo.png", "Square150x150Logo.png", "Square310x310Logo.png", "Wide310x150Logo.png", "StoreLogo.png")
+          foreach ($tile in $tiles) {
+            $src = "buildResources\$tile"
+            if (Test-Path $src) {
+              Copy-Item $src "$assetsDir\$tile" -Force
+              Write-Host "  Copied $tile"
             }
-            
-            # Patch AppxManifest.xml
-            $manifestPath = "$tempDir\AppxManifest.xml"
-            $manifest = Get-Content $manifestPath -Raw
-            
-            # Add Square71x71Logo and Square310x310Logo
-            if ($manifest -notmatch "Square71x71Logo") {
-              $manifest = $manifest -replace '<uap:DefaultTile Wide310x150Logo="assets\\Wide310x150Logo\.png"\s*/>', '<uap:DefaultTile Wide310x150Logo="assets\Wide310x150Logo.png" Square71x71Logo="assets\Square71x71Logo.png" Square310x310Logo="assets\Square310x310Logo.png" ShortName="Lyra Music" />'
-            }
-            
-            # Fix background color
-            $manifest = $manifest -replace 'BackgroundColor="#464646"', 'BackgroundColor="#1a1a2e"'
-            
-            Set-Content -Path $manifestPath -Value $manifest -Encoding UTF8
-            Write-Host "  Patched AppxManifest.xml"
-            
-            # Remove signature files (re-signing handled by Store)
-            Remove-Item "$tempDir\AppxSignature.p7x" -ErrorAction SilentlyContinue
-            Remove-Item "$tempDir\AppxBlockMap.xml" -ErrorAction SilentlyContinue
-            Remove-Item "$tempDir\[Content_Types].xml" -ErrorAction SilentlyContinue
-            
-            # Re-pack using MakeAppx
-            $sdkPaths = @(
-              "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.22621.0\x64\makeappx.exe",
-              "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.19041.0\x64\makeappx.exe",
-              "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.22000.0\x64\makeappx.exe"
-            )
-            
-            # Also search dynamically
-            $makeappx = $null
-            $sdkBin = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
-            if (Test-Path $sdkBin) {
-              $found = Get-ChildItem -Path $sdkBin -Recurse -Filter "makeappx.exe" | Where-Object { $_.DirectoryName -match "x64" } | Select-Object -First 1
-              if ($found) { $makeappx = $found.FullName }
-            }
-            
-            if (-not $makeappx) {
-              foreach ($p in $sdkPaths) {
-                if (Test-Path $p) { $makeappx = $p; break }
-              }
-            }
-            
-            if ($makeappx) {
-              Write-Host "Using MakeAppx: $makeappx"
-              $newAppx = $appxFile.FullName + ".new"
-              & $makeappx pack /d $tempDir /p $newAppx /o
-              Remove-Item $appxFile.FullName -Force
-              Move-Item $newAppx $appxFile.FullName
-              Write-Host "APPX re-packed successfully with tile assets!"
-            } else {
-              Write-Host "WARNING: MakeAppx not found, using zip fallback"
-              Remove-Item $appxFile.FullName -Force
-              Compress-Archive -Path "$tempDir\*" -DestinationPath ($appxFile.FullName + ".zip") -Force
-              Move-Item ($appxFile.FullName + ".zip") $appxFile.FullName
-            }
-            
-            # Cleanup
-            Remove-Item $tempDir -Recurse -Force
           }
+          
+          # Patch manifest
+          $manifestPath = "$tempDir\AppxManifest.xml"
+          $manifest = Get-Content $manifestPath -Raw
+          
+          if ($manifest -notmatch "Square71x71Logo") {
+            $manifest = $manifest -replace '(<uap:DefaultTile\s+Wide310x150Logo="assets\\Wide310x150Logo\.png")\s*(/>)', '$1 Square71x71Logo="assets\Square71x71Logo.png" Square310x310Logo="assets\Square310x310Logo.png" ShortName="Lyra Music" $2'
+          }
+          
+          $manifest = $manifest -replace 'BackgroundColor="#464646"', 'BackgroundColor="#1a1a2e"'
+          Set-Content -Path $manifestPath -Value $manifest -Encoding UTF8 -NoNewline
+          Write-Host "  Patched AppxManifest.xml"
+          
+          # Remove signing artifacts (Store re-signs)
+          Remove-Item "$tempDir\AppxSignature.p7x" -ErrorAction SilentlyContinue
+          Remove-Item "$tempDir\AppxBlockMap.xml" -ErrorAction SilentlyContinue
+          Remove-Item "$tempDir\[Content_Types].xml" -ErrorAction SilentlyContinue
+          
+          # Find MakeAppx
+          $makeappx = $null
+          $sdkBin = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
+          if (Test-Path $sdkBin) {
+            $found = Get-ChildItem -Path $sdkBin -Recurse -Filter "makeappx.exe" -ErrorAction SilentlyContinue | Where-Object { $_.DirectoryName -match "x64" } | Select-Object -First 1
+            if ($found) { $makeappx = $found.FullName }
+          }
+          
+          if (-not $makeappx) { Write-Error "MakeAppx.exe not found!"; exit 1 }
+          Write-Host "Using MakeAppx: $makeappx"
+          
+          # Re-pack
+          Remove-Item $appxFile.FullName -Force
+          & $makeappx pack /d $tempDir /p $appxFile.FullName /o
+          if ($LASTEXITCODE -ne 0) { Write-Error "MakeAppx failed!"; exit 1 }
+          
+          Write-Host "APPX re-packed with tile assets!"
+          
+          # Verify
+          Write-Host "Final APPX size: $((Get-Item $appxFile.FullName).Length / 1MB) MB"
+          
+          # Cleanup
+          Remove-Item $tempDir -Recurse -Force
         shell: pwsh
 
       - name: Upload APPX artifact
