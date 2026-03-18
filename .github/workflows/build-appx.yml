@@ -44,12 +44,28 @@ jobs:
           
           $tempDir = "dist\_appx_temp"
           
-          # Use 7z to extract APPX properly (preserves internal structure)
+          # Use 7z to extract
           & 7z x $appxFile.FullName -o"$tempDir" -y
           
-          # List contents to verify
-          Write-Host "=== Extracted contents ==="
-          Get-ChildItem -Path $tempDir -Recurse -Depth 1 | ForEach-Object { Write-Host $_.FullName }
+          # Fix URL-encoded filenames (7z decodes %20 etc incorrectly)
+          Get-ChildItem -Path $tempDir -Recurse -File | Where-Object { $_.Name -match '%[0-9a-fA-F]{2}' } | ForEach-Object {
+            $newName = [System.Uri]::UnescapeDataString($_.Name)
+            if ($newName -ne $_.Name) {
+              $newPath = Join-Path $_.DirectoryName $newName
+              Write-Host "  Renaming: $($_.Name) -> $newName"
+              Move-Item $_.FullName $newPath
+            }
+          }
+          
+          # Also fix directory names
+          Get-ChildItem -Path $tempDir -Recurse -Directory | Where-Object { $_.Name -match '%[0-9a-fA-F]{2}' } | ForEach-Object {
+            $newName = [System.Uri]::UnescapeDataString($_.Name)
+            if ($newName -ne $_.Name) {
+              $newPath = Join-Path $_.Parent.FullName $newName
+              Write-Host "  Renaming dir: $($_.Name) -> $newName"
+              Move-Item $_.FullName $newPath
+            }
+          }
           
           # Copy tile assets
           $assetsDir = "$tempDir\assets"
@@ -76,10 +92,19 @@ jobs:
           Set-Content -Path $manifestPath -Value $manifest -Encoding UTF8 -NoNewline
           Write-Host "  Patched AppxManifest.xml"
           
-          # Remove signing artifacts (Store re-signs)
+          # Remove signing artifacts
           Remove-Item "$tempDir\AppxSignature.p7x" -ErrorAction SilentlyContinue
           Remove-Item "$tempDir\AppxBlockMap.xml" -ErrorAction SilentlyContinue
           Remove-Item "$tempDir\[Content_Types].xml" -ErrorAction SilentlyContinue
+          
+          # Verify exe exists
+          $exePath = "$tempDir\app\Lyra Music.exe"
+          if (Test-Path $exePath) {
+            Write-Host "  Verified: app\Lyra Music.exe exists"
+          } else {
+            Write-Host "  WARNING: app\Lyra Music.exe NOT found, listing app dir:"
+            Get-ChildItem "$tempDir\app" -File | ForEach-Object { Write-Host "    $($_.Name)" }
+          }
           
           # Find MakeAppx
           $makeappx = $null
@@ -98,9 +123,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { Write-Error "MakeAppx failed!"; exit 1 }
           
           Write-Host "APPX re-packed with tile assets!"
-          
-          # Verify
-          Write-Host "Final APPX size: $((Get-Item $appxFile.FullName).Length / 1MB) MB"
+          Write-Host "Final APPX size: $([math]::Round((Get-Item $appxFile.FullName).Length / 1MB, 2)) MB"
           
           # Cleanup
           Remove-Item $tempDir -Recurse -Force
