@@ -29,7 +29,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: electron-app
-        run: yarn install --ignore-optional
+        run: npm install --ignore-scripts --legacy-peer-deps
 
       - name: Build APPX
         working-directory: electron-app
