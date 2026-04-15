@@ -27,6 +27,13 @@ jobs:
       - name: Extract build
         run: Expand-Archive -Path appx-build.zip -DestinationPath electron-app
 
+      - name: Remove macOS-only dependencies
+        working-directory: electron-app
+        run: |
+          npm pkg delete devDependencies.dmg-license
+          npm pkg delete dependencies.dmg-license
+          npm pkg delete optionalDependencies.dmg-license
+
       - name: Install dependencies
         working-directory: electron-app
         run: npm install --ignore-scripts --legacy-peer-deps
