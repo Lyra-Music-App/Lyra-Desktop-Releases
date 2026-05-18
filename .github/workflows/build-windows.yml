@@ -1,0 +1,62 @@
+name: Build Windows
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Configure git to use HTTPS instead of SSH
+        run: git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+
+      - name: Download build zip
+        run: |
+          gh release download appx-build --pattern "appx-build.zip" --dir .
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract build
+        run: Expand-Archive -Path appx-build.zip -DestinationPath electron-app
+
+      - name: Remove macOS-only dependencies
+        working-directory: electron-app
+        run: |
+          npm pkg delete devDependencies.dmg-license
+          npm pkg delete dependencies.dmg-license
+          npm pkg delete optionalDependencies.dmg-license
+
+      - name: Install dependencies (with native build scripts)
+        working-directory: electron-app
+        # NOT --ignore-scripts: we need node-gyp to compile register-scheme
+        # natively for win32-x64 so the .node binary loads at app startup.
+        run: npm install --legacy-peer-deps
+
+      - name: Build Windows targets (nsis + zip + appx)
+        working-directory: electron-app
+        run: npx electron-builder@26.0.0 --win nsis zip appx --x64 --publish never
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: lyra-music-windows
+          path: |
+            electron-app/dist/*.exe
+            electron-app/dist/*.exe.blockmap
+            electron-app/dist/*.zip
+            electron-app/dist/*.appx
+            electron-app/dist/latest.yml
+
+      - name: Cleanup temp release
+        if: always()
+        run: gh release delete appx-build --repo Lyra-Music-App/Lyra-Desktop-Releases --yes --cleanup-tag 2>$null; exit 0
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
