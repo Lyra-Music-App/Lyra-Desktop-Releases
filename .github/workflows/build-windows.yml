@@ -27,18 +27,39 @@ jobs:
       - name: Extract build
         run: Expand-Archive -Path appx-build.zip -DestinationPath electron-app
 
-      - name: Remove macOS-only dependencies
+      - name: Remove macOS-only deps and the core/ postinstall trampoline
         working-directory: electron-app
+        # The postinstall script lives in the parent monorepo (StreamingCore-Client)
+        # which isn't checked out here. Strip the postinstall — we'll rebuild
+        # natives explicitly via electron-builder install-app-deps below.
         run: |
           npm pkg delete devDependencies.dmg-license
           npm pkg delete dependencies.dmg-license
           npm pkg delete optionalDependencies.dmg-license
+          npm pkg delete scripts.postinstall
 
-      - name: Install dependencies (with native build scripts)
+      - name: Install dependencies
         working-directory: electron-app
-        # NOT --ignore-scripts: we need node-gyp to compile register-scheme
-        # natively for win32-x64 so the .node binary loads at app startup.
-        run: npm install --legacy-peer-deps
+        run: npm install --legacy-peer-deps --ignore-scripts
+
+      - name: Rebuild native modules for Electron on win32-x64
+        working-directory: electron-app
+        # electron-builder install-app-deps reads the Electron version and
+        # platform/arch and runs node-gyp rebuild for every native dep. This
+        # is what makes register-scheme produce a real .node Windows PE.
+        run: npx electron-builder install-app-deps --platform=win32 --arch=x64
+
+      - name: Verify register-scheme .node is a Windows PE
+        working-directory: electron-app
+        run: |
+          $node = "node_modules\register-scheme\build\Release\register-protocol-handler.node"
+          if (!(Test-Path $node)) { Write-Error "register-scheme .node not built"; exit 1 }
+          $bytes = [System.IO.File]::ReadAllBytes($node)[0..1]
+          if ($bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+            Write-Error "register-scheme .node is not a Windows PE (MZ magic missing). Got: $($bytes[0]),$($bytes[1])"
+            exit 1
+          }
+          Write-Host "✓ register-scheme .node is a Windows PE"
 
       - name: Build Windows targets (nsis + zip + appx)
         working-directory: electron-app
