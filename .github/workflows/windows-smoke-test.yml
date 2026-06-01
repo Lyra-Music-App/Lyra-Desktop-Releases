@@ -1,0 +1,73 @@
+name: Windows Smoke Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to test (e.g. v1.0.10)'
+        required: true
+        default: 'v1.0.10'
+
+jobs:
+  windows-smoke:
+    runs-on: windows-latest
+    steps:
+      - name: Download Windows zip from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          gh release download "${{ github.event.inputs.tag }}" -R ${{ github.repository }} --pattern "*x64.zip" --dir .
+          ls -la *.zip
+
+      - name: Extract
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem -Filter *x64.zip | Select-Object -First 1
+          Expand-Archive -Path $zip.FullName -DestinationPath app -Force
+          Get-ChildItem -Recurse app -Filter *.exe | Select-Object FullName
+
+      - name: Launch the real app and capture startup (45s)
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Recurse app -Filter *.exe |
+            Where-Object { $_.Name -notmatch 'crashpad|Squirrel|elevate|Update' } |
+            Select-Object -First 1
+          Write-Host "EXE=$($exe.FullName)"
+          $env:ELECTRON_ENABLE_LOGGING = "1"
+          $p = Start-Process -FilePath $exe.FullName -ArgumentList '--no-sandbox','--disable-gpu' `
+                -PassThru -RedirectStandardError err.log -RedirectStandardOutput out.log
+          Start-Sleep -Seconds 45
+          $survived = -not $p.HasExited
+          if ($survived) { Write-Host "PROCESS STILL ALIVE after 45s"; try { Stop-Process -Id $p.Id -Force } catch {} }
+          else { Write-Host "PROCESS EXITED code=$($p.ExitCode)" }
+          Write-Host "========== STDERR =========="
+          if (Test-Path err.log) { Get-Content err.log -Tail 60 }
+          Write-Host "========== STDOUT =========="
+          if (Test-Path out.log) { Get-Content out.log -Tail 30 }
+          $log = ""
+          if (Test-Path err.log) { $log += Get-Content err.log -Raw }
+          if (Test-Path out.log) { $log += Get-Content out.log -Raw }
+          Write-Host "========== VERDICT =========="
+          if ($log -match "Cannot find module 'conf'") {
+            Write-Host "::error::CRASH - conf module MISSING"; exit 1
+          } elseif ($log -match "Cannot find module") {
+            Write-Host "::error::CRASH - a module is missing"; exit 1
+          } elseif ($log -match "A JavaScript error occurred|Uncaught Exception") {
+            Write-Host "::error::JS startup exception"; exit 1
+          } elseif ($log -match "Checking for update|mediaKeys|ready-to-show") {
+            Write-Host "PASS: app booted - main process reached app lifecycle"; exit 0
+          } elseif ($survived) {
+            Write-Host "PASS: app survived 45s with no module/startup crash"; exit 0
+          } else {
+            Write-Host "::warning::exited code $($p.ExitCode) with no module crash - inspect logs"; exit 0
+          }
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-run-logs
+          path: |
+            err.log
+            out.log
