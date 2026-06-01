@@ -1,0 +1,49 @@
+name: Electron Class Flag Probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb x11-utils xdotool openbox nodejs npm \
+            libgtk-3-0 libnss3 libgbm1 libasound2 libxkbcommon0 libatk1.0-0 \
+            libatk-bridge2.0-0 libcups2 libdrm2 libxcomposite1 libxdamage1 \
+            libxrandr2 libpango-1.0-0 libcairo2 libxfixes3 || true
+
+      - name: Minimal electron app with --class
+        run: |
+          mkdir app && cd app
+          npm init -y >/dev/null 2>&1
+          npm i electron@41.2.0 --no-audit --no-fund >/dev/null 2>&1
+          cat > main.js <<'EOF'
+          const { app, BrowserWindow } = require('electron')
+          app.commandLine.appendSwitch('class', 'lyra-desktop')
+          app.whenReady().then(() => {
+            const w = new BrowserWindow({ width: 600, height: 400, title: 'Lyra Music' })
+            w.loadURL('data:text/html,<h1>probe</h1>')
+          })
+          EOF
+          export DISPLAY=:99
+          Xvfb :99 -screen 0 1024x768x24 & sleep 3
+          openbox & sleep 2
+          ./node_modules/.bin/electron . --no-sandbox --disable-gpu >/tmp/e.log 2>&1 &
+          for i in $(seq 1 10); do
+            sleep 4
+            FOUND=0
+            for wid in $(xdotool search --all --name "" 2>/dev/null); do
+              CLS=$(xprop -id "$wid" WM_CLASS 2>/dev/null)
+              if echo "$CLS" | grep -qi 'lyra'; then echo "tick $i MATCH: wid=$wid $CLS"; FOUND=1; fi
+            done
+            [ "$FOUND" = "1" ] && break
+            echo "tick $i: no lyra window yet"
+          done
+          echo "===== FINAL all WM_CLASS ====="
+          for wid in $(xdotool search --all --name "" 2>/dev/null); do
+            xprop -id "$wid" WM_CLASS 2>/dev/null | tr '\n' ' '; echo
+          done
+          echo "===== electron log ====="; tail -10 /tmp/e.log
