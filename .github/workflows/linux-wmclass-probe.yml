@@ -1,0 +1,65 @@
+name: Linux WMClass Probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to probe'
+        required: true
+        default: 'v1.0.10'
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb x11-utils xdotool libgtk-3-0 libnotify4 libnss3 \
+            libxss1 libxtst6 xdg-utils libatspi2.0-0 libsecret-1-0 libgbm1 libasound2 fuse libfuse2 || true
+
+      - name: Download AppImage + deb
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "${{ github.event.inputs.tag }}" -R ${{ github.repository }} --pattern "*x86_64.AppImage" --dir .
+          gh release download "${{ github.event.inputs.tag }}" -R ${{ github.repository }} --pattern "*amd64.deb" --dir . || true
+          chmod +x *.AppImage
+
+      - name: Inspect bundled + packaged .desktop files
+        run: |
+          APP=$(ls *.AppImage); ./"$APP" --appimage-extract >/dev/null 2>&1
+          echo "===== .desktop inside AppImage ====="
+          for f in $(find squashfs-root -maxdepth 2 -name '*.desktop'); do echo "### FILE: $f (basename=$(basename "$f"))"; cat "$f"; echo; done
+          echo "===== .desktop inside .deb ====="
+          if ls *.deb >/dev/null 2>&1; then
+            dpkg-deb -x *.deb debroot
+            for f in $(find debroot -name '*.desktop'); do echo "### FILE: $f (basename=$(basename "$f"))"; cat "$f"; echo; done
+          fi
+          echo "===== executable name ====="
+          find squashfs-root -maxdepth 1 -type f -executable ! -name '*.so*' | head
+
+      - name: Launch under xvfb and read real WM_CLASS / app_id
+        run: |
+          BIN=$(find squashfs-root -maxdepth 1 -type f -name 'lyra-desktop' | head -1)
+          [ -z "$BIN" ] && BIN=$(find squashfs-root -maxdepth 1 -type f -executable ! -name '*.so*' | head -1)
+          echo "BIN=$BIN"
+          export DISPLAY=:99
+          Xvfb :99 -screen 0 1280x800x24 &
+          sleep 3
+          export HOME=/home/runner ELECTRON_ENABLE_LOGGING=1
+          "$BIN" --no-sandbox --disable-gpu >/tmp/app.log 2>&1 &
+          APPPID=$!
+          sleep 20
+          echo "===== windows present (xdotool) ====="
+          for wid in $(xdotool search --onlyvisible --name "" 2>/dev/null; xdotool search --name "." 2>/dev/null); do
+            echo "--- window $wid ---"
+            xprop -id "$wid" WM_CLASS WM_NAME _NET_WM_NAME 2>/dev/null | sed 's/^/  /'
+          done | sort -u
+          echo "===== xdotool getwindowclassname ====="
+          WID=$(xdotool search --name "Lyra" 2>/dev/null | head -1)
+          echo "WID=$WID"
+          [ -n "$WID" ] && xprop -id "$WID" WM_CLASS 2>/dev/null
+          echo "===== app stderr tail ====="
+          tail -8 /tmp/app.log
+          kill $APPPID 2>/dev/null || true
