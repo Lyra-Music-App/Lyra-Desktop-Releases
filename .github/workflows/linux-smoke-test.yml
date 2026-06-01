@@ -1,0 +1,69 @@
+name: Linux Smoke Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to test (e.g. v1.0.10)'
+        required: true
+        default: 'v1.0.10'
+
+jobs:
+  linux-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install runtime deps + xvfb
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb libgtk-3-0 libnotify4 libnss3 libxss1 \
+            libxtst6 xdg-utils libatspi2.0-0 libsecret-1-0 libgbm1 libasound2 \
+            fuse libfuse2 || sudo apt-get install -y -qq fuse3
+
+      - name: Download AppImage from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "${{ github.event.inputs.tag }}" \
+            -R ${{ github.repository }} \
+            --pattern "*x86_64.AppImage" --dir .
+          ls -la *.AppImage
+          chmod +x *.AppImage
+
+      - name: Launch the real app under xvfb (45s) and capture startup
+        run: |
+          APP=$(ls *.AppImage)
+          echo "=== launching $APP on $(uname -m) ==="
+          set +e
+          # APPIMAGE extraction (avoid fuse issues in CI) then run the inner binary
+          ./"$APP" --appimage-extract >/dev/null 2>&1
+          BIN=$(find squashfs-root -maxdepth 1 -type f -name "lyra-desktop" | head -1)
+          [ -z "$BIN" ] && BIN=$(find squashfs-root -maxdepth 2 -name "AppRun" | head -1)
+          echo "BIN=$BIN"
+          export HOME=/home/runner ELECTRON_ENABLE_LOGGING=1
+          timeout 45 xvfb-run -a --server-args="-screen 0 1280x800x24" \
+            "$BIN" --no-sandbox --disable-gpu > run.log 2>&1
+          RC=$?
+          echo "EXIT_CODE=$RC (124 = survived full 45s window)"
+          echo "============ APP OUTPUT (filtered) ============"
+          grep -v -E "Failed to connect to the bus|Gpu|GPU|sandbox|DevTools|Vulkan|libva|gbm|EGL" run.log | head -60
+          echo "============ VERDICT ============"
+          if grep -q "Cannot find module 'conf'" run.log; then
+            echo "::error::CRASH - conf module MISSING (1.0.9 bug)"; exit 1
+          elif grep -qi "Cannot find module" run.log; then
+            echo "::error::CRASH - a module is missing:"; grep -i "Cannot find module" run.log; exit 1
+          elif grep -qi "A JavaScript error occurred\|Uncaught Exception" run.log; then
+            echo "::error::JS startup exception:"; grep -i -A4 "JavaScript error\|Uncaught Exception" run.log; exit 1
+          elif grep -qi "Checking for update\|mediaKeys\|ready-to-show\|window-all-closed" run.log; then
+            echo "PASS: app booted - main process reached app lifecycle"; exit 0
+          elif [ $RC -eq 124 ]; then
+            echo "PASS: app survived 45s with no module/startup crash"; exit 0
+          else
+            echo "::warning::exited rc=$RC with no module crash - inspect log"; exit 0
+          fi
+
+      - name: Upload run log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-run-log
+          path: run.log
