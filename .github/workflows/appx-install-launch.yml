@@ -1,0 +1,132 @@
+name: APPX Install + Launch Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  install-and-launch:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Configure git HTTPS
+        run: git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+      - name: Download build zip
+        run: gh release download appx-build --pattern "appx-build.zip" --dir .
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract build
+        run: Expand-Archive -Path appx-build.zip -DestinationPath electron-app
+      - name: Strip mac-only deps + postinstall
+        working-directory: electron-app
+        run: |
+          npm pkg delete devDependencies.dmg-license
+          npm pkg delete dependencies.dmg-license
+          npm pkg delete optionalDependencies.dmg-license
+          npm pkg delete scripts.postinstall
+      - name: Install dependencies
+        working-directory: electron-app
+        run: npm install --legacy-peer-deps --ignore-scripts
+      - name: Rebuild native modules win32-x64
+        working-directory: electron-app
+        run: npx electron-builder install-app-deps --platform=win32 --arch=x64
+      - name: Build APPX
+        working-directory: electron-app
+        run: npx electron-builder@26.0.0 --win appx --x64 --publish never
+
+      - name: Sign the APPX with a trusted self-signed cert
+        working-directory: electron-app
+        shell: pwsh
+        run: |
+          $appx = (Get-ChildItem dist\*.appx | Select-Object -First 1).FullName
+          Write-Host "APPX=$appx"
+          # Subject MUST equal the package publisher exactly
+          $subject = "CN=3A309F49-B229-4D77-B1D6-53F794FEB410"
+          $cert = New-SelfSignedCertificate -Type Custom -Subject $subject `
+            -KeyUsage DigitalSignature -FriendlyName "Lyra Test Cert" `
+            -CertStoreLocation "Cert:\LocalMachine\My" `
+            -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3","2.5.29.19={text}")
+          $thumb = $cert.Thumbprint
+          $pw = ConvertTo-SecureString "test1234" -Force -AsPlainText
+          Export-PfxCertificate -Cert "Cert:\LocalMachine\My\$thumb" -FilePath cert.pfx -Password $pw | Out-Null
+          Import-Certificate -FilePath (Export-Certificate -Cert "Cert:\LocalMachine\My\$thumb" -FilePath cert.cer).FullName -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+          Import-Certificate -FilePath cert.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople | Out-Null
+          $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName | Select-Object -Last 1).FullName
+          Write-Host "signtool=$signtool"
+          & $signtool sign /fd SHA256 /a /f cert.pfx /p test1234 $appx
+          if ($LASTEXITCODE -ne 0) { Write-Error "signtool failed"; exit 1 }
+          "APPX_PATH=$appx" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Install the APPX (Add-AppxPackage)
+        shell: pwsh
+        run: |
+          Write-Host "Installing $env:APPX_PATH"
+          Add-AppxPackage -Path $env:APPX_PATH -ErrorAction Stop
+          $pkg = Get-AppxPackage *LyraMusic*
+          if (-not $pkg) { Write-Error "Package not installed"; exit 1 }
+          Write-Host "Installed: $($pkg.PackageFullName)"
+          Write-Host "PFN=$($pkg.PackageFamilyName)"
+          "PFN=$($pkg.PackageFamilyName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          # App Id from manifest
+          $manifest = Get-AppxPackageManifest $pkg.PackageFullName
+          $appId = $manifest.Package.Applications.Application.Id
+          Write-Host "AppId=$appId"
+          "AUMID=$($pkg.PackageFamilyName)!$appId" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "INSTALL_LOC=$($pkg.InstallLocation)" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Launch the installed APPX and watch for crash (50s)
+        shell: pwsh
+        run: |
+          Write-Host "Launching AUMID=$env:AUMID"
+          $t0 = Get-Date
+          Start-Process "shell:AppsFolder\$env:AUMID"
+          Start-Sleep -Seconds 8
+          $proc = Get-Process "Lyra Music" -ErrorAction SilentlyContinue
+          if ($proc) { Write-Host "Process started (PID $($proc.Id -join ','))" }
+          else {
+            Write-Host "Process NOT found 8s after launch - trying direct exe in package..."
+            $exe = Get-ChildItem -Recurse "$env:INSTALL_LOC" -Filter "Lyra Music.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($exe) { Write-Host "exe=$($exe.FullName)"; & "C:\Windows\System32\cmd.exe" /c start "" $exe.FullName; Start-Sleep -Seconds 6; $proc = Get-Process "Lyra Music" -ErrorAction SilentlyContinue }
+          }
+          # let it run / crash
+          Start-Sleep -Seconds 42
+          $alive = Get-Process "Lyra Music" -ErrorAction SilentlyContinue
+          Write-Host "========== PROCESS STATE =========="
+          if ($alive) { Write-Host "ALIVE after ~50s (PID $($alive.Id -join ','))" } else { Write-Host "NOT RUNNING after ~50s (exited or crashed)" }
+
+          Write-Host "========== MAIN CRASH LOG (lyra-main-crash.log) =========="
+          $logs = Get-ChildItem -Recurse "$env:LOCALAPPDATA\Packages\$env:PFN" -Filter "lyra-main-crash.log" -ErrorAction SilentlyContinue
+          if ($logs) { foreach ($l in $logs) { Write-Host "--- $($l.FullName) ---"; Get-Content $l.FullName -Tail 60 } } else { Write-Host "(no lyra-main-crash.log - main process did not hit the crash guard)" }
+
+          Write-Host "========== APP DATA TREE =========="
+          if (Test-Path "$env:LOCALAPPDATA\Packages\$env:PFN") { Get-ChildItem -Recurse "$env:LOCALAPPDATA\Packages\$env:PFN" -ErrorAction SilentlyContinue | Select-Object FullName | Select-Object -First 40 | ForEach-Object { Write-Host $_.FullName } }
+
+          Write-Host "========== EVENT LOG (Application errors, last 5 min) =========="
+          $since = (Get-Date).AddMinutes(-5)
+          try {
+            Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=$since} -ErrorAction SilentlyContinue |
+              Where-Object { $_.ProviderName -match 'Application Error|Windows Error Reporting|.NET Runtime|AppModel' -or $_.Message -match 'Lyra|electron' } |
+              Select-Object -First 12 | ForEach-Object { Write-Host "[$($_.ProviderName)] $($_.TimeCreated)"; Write-Host $_.Message.Substring(0,[Math]::Min(600,$_.Message.Length)) ; Write-Host "----" }
+          } catch { Write-Host "event log read failed: $_" }
+
+          Write-Host "========== VERDICT =========="
+          if ($logs) { Write-Host "::error::APPX main-process crash captured (lyra-main-crash.log present)"; exit 1 }
+          elseif ($alive) { Write-Host "PASS: installed APPX launched and stayed alive ~50s"; exit 0 }
+          else { Write-Host "::warning::APPX process not running after 50s and no crash-guard log - inspect event log above"; exit 0 }
+
+      - name: Collect appx app data
+        if: always()
+        shell: pwsh
+        run: |
+          $dest = "appx-appdata"; New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          if (Test-Path "$env:LOCALAPPDATA\Packages\$env:PFN") {
+            Copy-Item -Recurse -Force "$env:LOCALAPPDATA\Packages\$env:PFN\*" $dest -ErrorAction SilentlyContinue
+          }
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: appx-launch-diagnostics
+          path: appx-appdata
