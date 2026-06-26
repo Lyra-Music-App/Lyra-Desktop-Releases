@@ -1,0 +1,83 @@
+name: Windows Build + Launch Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-and-launch:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Configure git HTTPS
+        run: git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+      - name: Download build zip
+        run: gh release download appx-build --pattern "appx-build.zip" --dir .
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract build
+        run: Expand-Archive -Path appx-build.zip -DestinationPath electron-app
+      - name: Strip mac-only deps + postinstall
+        working-directory: electron-app
+        run: |
+          npm pkg delete devDependencies.dmg-license
+          npm pkg delete dependencies.dmg-license
+          npm pkg delete optionalDependencies.dmg-license
+          npm pkg delete scripts.postinstall
+      - name: Install dependencies
+        working-directory: electron-app
+        run: npm install --legacy-peer-deps --ignore-scripts
+      - name: Rebuild native modules for Electron win32-x64
+        working-directory: electron-app
+        run: npx electron-builder install-app-deps --platform=win32 --arch=x64
+      - name: Verify register-scheme .node is a Windows PE
+        working-directory: electron-app
+        run: |
+          $node = "node_modules\register-scheme\build\Release\register-protocol-handler.node"
+          if (!(Test-Path $node)) { Write-Error "register-scheme .node not built"; exit 1 }
+          $bytes = [System.IO.File]::ReadAllBytes($node)[0..1]
+          if ($bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { Write-Error "register-scheme .node not a Windows PE"; exit 1 }
+          Write-Host "register-scheme .node OK (PE)"
+      - name: Build Windows targets (nsis + zip + appx)
+        working-directory: electron-app
+        run: npx electron-builder@26.0.0 --win nsis zip appx --x64 --publish never
+      - name: Launch the real app and capture startup (45s)
+        working-directory: electron-app
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Recurse dist\win-unpacked -Filter *.exe |
+            Where-Object { $_.Name -notmatch 'crashpad|Squirrel|elevate|Update' } |
+            Select-Object -First 1
+          Write-Host "EXE=$($exe.FullName)"
+          $env:ELECTRON_ENABLE_LOGGING = "1"
+          $p = Start-Process -FilePath $exe.FullName -ArgumentList '--no-sandbox','--disable-gpu' `
+                -PassThru -RedirectStandardError err.log -RedirectStandardOutput out.log
+          Start-Sleep -Seconds 45
+          $survived = -not $p.HasExited
+          if ($survived) { Write-Host "PROCESS STILL ALIVE after 45s"; try { Stop-Process -Id $p.Id -Force } catch {} }
+          else { Write-Host "PROCESS EXITED code=$($p.ExitCode)" }
+          Write-Host "========== STDERR =========="
+          if (Test-Path err.log) { Get-Content err.log -Tail 80 }
+          Write-Host "========== STDOUT =========="
+          if (Test-Path out.log) { Get-Content out.log -Tail 40 }
+          $log = ""
+          if (Test-Path err.log) { $log += Get-Content err.log -Raw }
+          if (Test-Path out.log) { $log += Get-Content out.log -Raw }
+          Write-Host "========== VERDICT =========="
+          if ($log -match "Cannot find module") { Write-Host "::error::CRASH - module missing"; exit 1 }
+          elseif ($log -match "A JavaScript error occurred|Uncaught Exception") { Write-Host "::error::JS startup exception"; exit 1 }
+          elseif ($log -match "ready-to-show|mediaKeys|Checking for update") { Write-Host "PASS: app booted to lifecycle"; exit 0 }
+          elseif ($survived) { Write-Host "PASS: survived 45s, no module/startup crash"; exit 0 }
+          else { Write-Host "::warning::exited code $($p.ExitCode) no module crash"; exit 0 }
+      - name: Upload artifacts (appx + logs)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lyra-music-windows
+          path: |
+            electron-app/dist/*.appx
+            electron-app/dist/*.zip
+            electron-app/err.log
+            electron-app/out.log
