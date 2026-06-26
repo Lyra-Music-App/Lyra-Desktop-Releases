@@ -40,9 +40,7 @@ jobs:
         shell: pwsh
         run: |
           $appx = (Get-ChildItem dist\*.appx | Select-Object -First 1).FullName
-          $cert = New-SelfSignedCertificate -Type Custom -Subject "CN=3A309F49-B229-4D77-B1D6-53F794FEB410" `
-            -KeyUsage DigitalSignature -CertStoreLocation "Cert:\LocalMachine\My" `
-            -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3","2.5.29.19={text}")
+          $cert = New-SelfSignedCertificate -Type Custom -Subject "CN=3A309F49-B229-4D77-B1D6-53F794FEB410" -KeyUsage DigitalSignature -CertStoreLocation "Cert:\LocalMachine\My" -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3","2.5.29.19={text}")
           $pw = ConvertTo-SecureString "test1234" -Force -AsPlainText
           Export-PfxCertificate -Cert "Cert:\LocalMachine\My\$($cert.Thumbprint)" -FilePath cert.pfx -Password $pw | Out-Null
           $cer = Export-Certificate -Cert "Cert:\LocalMachine\My\$($cert.Thumbprint)" -FilePath cert.cer
@@ -55,7 +53,7 @@ jobs:
           $manifest = Get-AppxPackageManifest $pkg.PackageFullName
           $appId = $manifest.Package.Applications.Application.Id
           "AUMID=$($pkg.PackageFamilyName)!$appId" | Out-File -FilePath $env:GITHUB_ENV -Append
-      - name: Launch + screenshot the screen
+      - name: Launch and screenshot
         shell: pwsh
         run: |
           Add-Type -AssemblyName System.Windows.Forms
@@ -72,25 +70,14 @@ jobs:
           New-Item -ItemType Directory -Force -Path shots | Out-Null
           Write-Host "Launching $env:AUMID"
           Start-Process "shell:AppsFolder\$env:AUMID"
-          Start-Sleep -Seconds 12
+          Start-Sleep -Seconds 14
           Shot "shots\01-loading.png"
-          Start-Sleep -Seconds 18
-          # bring Lyra window to foreground if possible
-          $p = Get-Process "Lyra Music" -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -ne "" } | Select-Object -First 1
-          if ($p) {
-            Add-Type @"
-using System;using System.Runtime.InteropServices;
-public class W{ [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
-[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h,int n);}
-"@
-            [W]::ShowWindow($p.MainWindowHandle, 3) | Out-Null
-            [W]::SetForegroundWindow($p.MainWindowHandle) | Out-Null
-            Start-Sleep -Seconds 2
-            Write-Host "Lyra window title: '$($p.MainWindowTitle)'"
-          } else { Write-Host "no Lyra window with title yet" }
+          Start-Sleep -Seconds 20
           Shot "shots\02-loaded.png"
+          $p = Get-Process "Lyra Music" -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -ne "" } | Select-Object -First 1
+          if ($p) { Write-Host ("Lyra window title: '" + $p.MainWindowTitle + "'") } else { Write-Host "no titled Lyra window detected" }
           $alive = Get-Process "Lyra Music" -ErrorAction SilentlyContinue
-          Write-Host (($alive) ? "ALIVE at screenshot time" : "NOT running")
+          if ($alive) { Write-Host "ALIVE at screenshot time" } else { Write-Host "NOT running" }
       - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4
